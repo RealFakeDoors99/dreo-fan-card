@@ -19,6 +19,11 @@ class DreoFanCard extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     if (!this.shadowRoot || !this.config) return;
+    // The first `hass` only establishes a baseline; a genuine off->on edge means
+    // the head may have moved since the last readable angle.
+    const on = this.state(this.config.entity)?.state === 'on';
+    if (on && this._wasOn === false) this.refreshAnglesOnPowerOn();
+    this._wasOn = on;
     this.rememberAll();
     if (this._optimistic && this.orientationConfirmed()) this.clearOptimistic();
     if (this._dragging || this._committing) return;
@@ -88,6 +93,51 @@ class DreoFanCard extends HTMLElement {
   sweepRight() { return this.remembered('right', this.config.range_right_entity, 60); }
   sweepDown() { return this.remembered('down', this.config.range_down_entity, -30); }
   sweepUp() { return this.remembered('up', this.config.range_up_entity, 90); }
+
+  // ---------------------------------------------------------------------
+  // Angle refresh
+  //
+  // The angle entities only carry a live value while the fan is on and not
+  // sweeping; every other moment is drawn from the remembered copy above. So a
+  // value that was already out of date when it was cached stays on screen
+  // indefinitely — the model held a downward tilt through a whole horizontal
+  // sweep while the real head sat level. Force the integration to re-poll at
+  // the two points the cache is about to be leant on for a long time: when the
+  // fan comes on, and just before oscillation takes the entities offline.
+  // ---------------------------------------------------------------------
+
+  anglesReadable() {
+    return Number.isFinite(Number(this.state(this.config.horizontal_entity)?.state))
+      && Number.isFinite(Number(this.state(this.config.vertical_entity)?.state));
+  }
+
+  async refreshAngles() {
+    const entity_id = [this.config.horizontal_entity, this.config.vertical_entity];
+    try {
+      await this.call('homeassistant', 'update_entity', { entity_id });
+    } catch (e) {
+      return; // not every integration implements forced updates
+    }
+    // Nothing to read back here: whatever the poll produced arrives as a normal
+    // state update, and `rememberAll` folds it into the cache.
+    await this.sleep(Number(this.config.command_settle_ms));
+  }
+
+  // The head can be re-aimed by the app or a remote, and levels itself on spin
+  // up, all while the card has no readable angle to watch. Re-poll on every
+  // off->on edge, retrying for integrations that report the new position a beat
+  // after the fan itself reports `on`.
+  async refreshAnglesOnPowerOn() {
+    const run = this._refreshRun = (this._refreshRun ?? 0) + 1;
+    for (const wait of [0, 1200, 3000]) {
+      if (wait) await this.sleep(wait);
+      // A newer power cycle, a drag, or our own write all outrank this.
+      if (run !== this._refreshRun || this._committing || this._dragging) return;
+      if (this.state(this.config.entity)?.state !== 'on') return;
+      await this.refreshAngles();
+      if (this.anglesReadable()) return;
+    }
+  }
 
   call(domain, service, data) {
     return this._hass.callService(domain, service, data);
@@ -177,6 +227,19 @@ class DreoFanCard extends HTMLElement {
 
   isOscillating() {
     return this.direction() !== 'fixed';
+  }
+
+  async setDirection(option) {
+    // Grab a live angle while the entities are still readable. Once the sweep
+    // starts they go `unavailable`, and anything stale in the cache is what the
+    // model shows for the rest of the run.
+    if (option !== 'fixed' && !this.isOscillating() && !this._committing
+      && this.state(this.config.entity)?.state === 'on') {
+      await this.refreshAngles();
+    }
+    return this.call('select', 'select_option', {
+      entity_id: this.config.direction_entity, option,
+    });
   }
 
   // This fan has 9 discrete speeds (11%, 22%, 33% …) but reports
@@ -761,7 +824,7 @@ class DreoFanCard extends HTMLElement {
       percentage: Math.round((Number(e.target.value) / this.speedCount()) * 100),
     });
     this.shadowRoot.querySelectorAll('[data-axis]').forEach(b => b.onclick = async () => this.nudge(b.dataset.axis, Number(b.dataset.delta)));
-    this.shadowRoot.querySelectorAll('[data-direction]').forEach(b => b.onclick = () => this.call('select','select_option',{entity_id:this.config.direction_entity,option:b.dataset.direction}));
+    this.shadowRoot.querySelectorAll('[data-direction]').forEach(b => b.onclick = () => this.setDirection(b.dataset.direction));
 
     const pad = $('.angle-pad');
     const direction = this.direction();
