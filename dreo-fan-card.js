@@ -21,7 +21,7 @@ class DreoFanCard extends HTMLElement {
     if (!this.shadowRoot || !this.config) return;
     this.rememberAll();
     if (this._optimistic && this.orientationConfirmed()) this.clearOptimistic();
-    if (this._dragging || this._committing || this._modalOpen) return;
+    if (this._dragging || this._committing) return;
     const signature = this.signature();
     if (signature !== this._lastSignature) this.render();
   }
@@ -153,9 +153,7 @@ class DreoFanCard extends HTMLElement {
   async nudge(axis, delta) {
     if (this._committing) return;
     if (!await this.ensureOn()) return;
-    // Both axes are off-limits mid-sweep, so any nudge has to stop oscillation
-    // first. Read the angles only after that, since they report nothing until
-    // the fan is fixed.
+    // Manual nudges are disabled mid-sweep; the pad edits sweep limits instead.
     if (!await this.ensureFixed()) return;
     const h = this.hAngle() + (axis === 'h' ? delta : 0);
     const v = this.vAngle() + (axis === 'v' ? delta : 0);
@@ -212,40 +210,9 @@ class DreoFanCard extends HTMLElement {
     }
   }
 
-  showOscillationPrompt() {
-    return new Promise(resolve => {
-      const layer = this.shadowRoot.querySelector('.modal-layer');
-      if (!layer) return resolve(false);
-      this._modalOpen = true;
-      layer.classList.add('show');
-      const finish = accepted => {
-        layer.classList.remove('show');
-        this._modalOpen = false;
-        resolve(accepted);
-      };
-      layer.querySelector('.cancel').onclick = () => finish(false);
-      layer.querySelector('.accept').onclick = () => finish(true);
-      layer.onclick = event => { if (event.target === layer) finish(false); };
-    });
-  }
-
   async ensureFixed() {
     if (!this.isOscillating()) return true;
-    if (!await this.showOscillationPrompt()) return false;
-    this._committing = true;
-    try {
-      await this.call('select', 'select_option', {
-        entity_id: this.config.direction_entity,
-        option: 'fixed',
-      });
-      const fixed = await this.waitForState(this.config.direction_entity, 'fixed', 10000);
-      if (!fixed) return false;
-      // The angle entities come back online a beat after the mode change.
-      await this.sleep(Number(this.config.command_settle_ms));
-      return true;
-    } finally {
-      this._committing = false;
-    }
+    return false;
   }
 
   async commitOrientation(rawH, rawV, fixedAlready = false) {
@@ -306,18 +273,6 @@ class DreoFanCard extends HTMLElement {
     };
   }
 
-  rangeRow(axis, label, loId, hiId, fbMin, fbMax) {
-    const { min, max, lo, hi } = this.rangeBounds(loId, hiId, fbMin, fbMax);
-    const pos = n => ((n - min) / (max - min)) * 100;
-    return `<div class="range" data-axis="${axis}" data-min="${min}" data-max="${max}">
-      <div class="range-head"><span>${label}</span><span class="range-val">${lo}° to ${hi}°</span></div>
-      <div class="range-track">
-        <div class="range-fill" style="left:${pos(lo)}%;right:${100 - pos(hi)}%"></div>
-        <div class="range-handle lo" style="left:${pos(lo)}%"></div>
-        <div class="range-handle hi" style="left:${pos(hi)}%"></div>
-      </div></div>`;
-  }
-
   async commitRange(loId, loVal, hiId, hiVal) {
     if (this._committing) return;
     if (!await this.ensureOn()) { this.render(); return; }
@@ -365,37 +320,62 @@ class DreoFanCard extends HTMLElement {
   padX(h) { return this.padPos((h + 60) / 120); }
   padY(v) { return this.padPosY(1 - (v + 30) / 120); }
 
-  // Sweep limits are drawn as dimension bars: a thin line with a T at each end.
-  // The horizontal one sits in the reserved strip below the fan rather than
-  // across it. The vertical one nests alongside, on whichever side the head is
-  // pointing, at a fixed offset that clears the model at any angle.
+  // Horizontal and vertical angles use separate scales. Fixed mode draws one
+  // thumb per axis; oscillation modes draw the two editable sweep end stops.
+  // The vertical scale aligns with the horizontal rail's right end, but stays
+  // elevated so the two distinct angle domains remain visually separate.
   sweepOverlay(direction) {
-    if (direction === 'fixed') return '';
+    const manual = direction === 'fixed';
     let out = '';
     const originX = this.padX(-60);
     const originBottom = Number(this.config.sweep_origin_bottom ?? 5.5);
-    if (direction !== 'vertical') {
+    const ticks = (min, max, interval) => {
+      const values = [];
+      for (let value = min; value <= max; value += interval) values.push(value);
+      return values;
+    };
+    if (manual || direction !== 'vertical') {
       // full mechanical range as the dim rail
       const ra = originX, rb = this.padX(60);
       out += `<div class="sweep-h rail" style="left:${ra.toFixed(2)}%;width:${(rb-ra).toFixed(2)}%;`
         + `bottom:${originBottom}%"></div>`;
-      // active sweep as the bright fill with T-caps
-      const a = this.padX(this.sweepLeft()), b = this.padX(this.sweepRight());
-      out += `<div class="sweep-h" style="left:${Math.min(a,b).toFixed(2)}%;`
-        + `width:${Math.abs(b-a).toFixed(2)}%;bottom:${originBottom}%"><i></i><i></i></div>`;
+      out += ticks(-60, 60, 30).map(value => `<div class="sweep-tick h" style="left:${this.padX(value).toFixed(2)}%;`
+        + `bottom:calc(${originBottom}% - 3px)"><span>${value}°</span></div>`).join('');
+      if (manual) {
+        const angle = this._optimistic?.h ?? this.hAngle();
+        const zero = this.padX(0), value = this.padX(angle);
+        out += `<div class="sweep-h single${angle < 0 ? ' negative' : ''}" style="left:${Math.min(zero,value).toFixed(2)}%;`
+          + `width:${Math.abs(value-zero).toFixed(2)}%;bottom:${originBottom}%"><i></i></div>`;
+      } else {
+        const a = this.padX(this.sweepLeft()), b = this.padX(this.sweepRight());
+        out += `<div class="sweep-h" style="left:${Math.min(a,b).toFixed(2)}%;`
+          + `width:${Math.abs(b-a).toFixed(2)}%;bottom:${originBottom}%"><i></i><i></i></div>`;
+      }
     }
-    if (direction !== 'horizontal') {
-      // Share the horizontal rail's lower-left origin, then map the vertical
-      // range upward from -30 to 90 degrees.
+    if (manual || direction !== 'horizontal') {
+      // Keep the vertical scale separate from the horizontal one: their degree
+      // domains differ even though both happen to span 120 degrees.
+      const verticalX = this.padX(60);
       const railTop = this.padY(90);
-      const railHeight = 100 - originBottom - railTop;
+      const verticalBottom = 100 - this.padY(-30);
+      const railHeight = 100 - verticalBottom - railTop;
       const fromBottom = value => ((value + 30) / 120) * railHeight;
-      out += `<div class="sweep-v rail" style="left:${originX.toFixed(2)}%;bottom:${originBottom}%;`
+      out += `<div class="sweep-v rail" style="left:${verticalX.toFixed(2)}%;bottom:${verticalBottom.toFixed(2)}%;`
         + `height:${railHeight.toFixed(2)}%"></div>`;
-      const down = fromBottom(this.sweepDown()), up = fromBottom(this.sweepUp());
-      out += `<div class="sweep-v" style="left:${originX.toFixed(2)}%;`
-        + `bottom:${(originBottom + Math.min(down,up)).toFixed(2)}%;`
-        + `height:${Math.abs(up-down).toFixed(2)}%"><i></i><i></i></div>`;
+      out += ticks(-30, 90, 30).map(value => `<div class="sweep-tick v" style="left:calc(${verticalX.toFixed(2)}% - 3px);`
+        + `bottom:${(verticalBottom + fromBottom(value)).toFixed(2)}%"><span>${value}°</span></div>`).join('');
+      if (manual) {
+        const angle = this._optimistic?.v ?? this.vAngle();
+        const zero = fromBottom(0), value = fromBottom(angle);
+        out += `<div class="sweep-v single${angle < 0 ? ' negative' : ''}" style="left:${verticalX.toFixed(2)}%;`
+          + `bottom:${(verticalBottom + Math.min(zero,value)).toFixed(2)}%;`
+          + `height:${Math.abs(value-zero).toFixed(2)}%"><i></i></div>`;
+      } else {
+        const down = fromBottom(this.sweepDown()), up = fromBottom(this.sweepUp());
+        out += `<div class="sweep-v" style="left:${verticalX.toFixed(2)}%;`
+          + `bottom:${(verticalBottom + Math.min(down,up)).toFixed(2)}%;`
+          + `height:${Math.abs(up-down).toFixed(2)}%"><i></i><i></i></div>`;
+      }
     }
     return out;
   }
@@ -721,14 +701,17 @@ class DreoFanCard extends HTMLElement {
     const ticks = Array.from({ length: count }, (_, i) =>
       `<i class="${i < step ? 'on' : ''}" style="left:${count > 1 ? (i / (count - 1)) * 100 : 50}%"></i>`).join('');
     const hint = direction === 'fixed'
-      ? 'Drag to aim the fan'
-      : 'Tap to aim, which stops oscillation';
+      ? 'Drag either slider to aim the fan'
+      : 'Drag the blue end stops to set sweep limits';
     this.shadowRoot.innerHTML = `<style>${this.styles()}</style>
       <ha-card class="card ${on ? 'on' : 'off'} ${direction !== 'fixed' ? 'oscillating' : ''}">
         <header><div><h2>${this.config.name}</h2><p>${on ? `On · ${pct}% · ${mode}` : 'Off'}</p></div>
           <button class="power" aria-label="Power"><ha-icon icon="mdi:power"></ha-icon></button></header>
 
-        <section><div class="label">Mode</div><div class="modes">${modeButtons}</div></section>
+        <section class="mode-section"><details${this._modeOpen ? ' open' : ''}>
+          <summary><span class="label">Mode</span><span class="mode-summary"><span>${mode}</span><ha-icon icon="mdi:chevron-down"></ha-icon></span></summary>
+          <div class="modes">${modeButtons}</div>
+        </details></section>
 
         <section class="speed-row"><div class="label">Speed</div><strong>${on ? step : 0}<small>/${count}</small></strong>
           <div class="slider-wrap">
@@ -736,38 +719,24 @@ class DreoFanCard extends HTMLElement {
             <div class="ticks">${ticks}</div>
           </div></section>
 
-        <section><div class="section-head"><div class="label">3D Angle Control${this._optimistic ? '<small>Sending…</small>' : ''}</div><div class="angles"><span>↔ ${h}°</span><i></i><span>↕ ${v}°</span></div></div>
+        <section><div class="section-head"><div class="label">3D Angle Control${this._optimistic ? '<small class="sending">Sending…</small>' : ''}</div><div class="angles" aria-live="polite"></div></div>
           <div class="angle-pad" role="slider" aria-label="Fan angle">
             <div class="grid-lines"></div>${this.sweepOverlay(direction)}${this.fanGraphic(h, v)}
-            <div class="target" style="left:${this.padX(h)}%;top:${this.padY(v)}%"><span></span></div>
+            ${direction === 'fixed' ? `<div class="aim-control" role="group" aria-label="Manual adjustment">
+              <button class="aim-up" data-axis="v" data-delta="5" aria-label="Aim up"><ha-icon icon="mdi:chevron-up"></ha-icon></button>
+              <button class="aim-left" data-axis="h" data-delta="-5" aria-label="Aim left"><ha-icon icon="mdi:chevron-left"></ha-icon></button>
+              <button class="aim-right" data-axis="h" data-delta="5" aria-label="Aim right"><ha-icon icon="mdi:chevron-right"></ha-icon></button>
+              <button class="aim-down" data-axis="v" data-delta="-5" aria-label="Aim down"><ha-icon icon="mdi:chevron-down"></ha-icon></button>
+              <div class="aim-center" aria-hidden="true"><ha-icon icon="mdi:crosshairs"></ha-icon></div>
+            </div>` : ''}
           </div>
           <div class="hint">${hint}</div>
         </section>
 
-        <section class="manual"><div class="label">Manual adjustment</div><div class="dpad">
-          <button class="up" data-axis="v" data-delta="5"><ha-icon icon="mdi:chevron-up"></ha-icon></button>
-          <button class="left" data-axis="h" data-delta="-5"><ha-icon icon="mdi:chevron-left"></ha-icon></button>
-          <div class="center"></div>
-          <button class="right" data-axis="h" data-delta="5"><ha-icon icon="mdi:chevron-right"></ha-icon></button>
-          <button class="down" data-axis="v" data-delta="-5"><ha-icon icon="mdi:chevron-down"></ha-icon></button>
-        </div></section>
-
         <section><div class="label">Oscillation</div><div class="segments">
           ${[['fixed','Off'],['horizontal','Horizontal'],['vertical','Vertical'],['both','3D']].map(([x,l]) => `<button data-direction="${x}" class="${direction===x?'active':''}">${l}</button>`).join('')}
         </div></section>
-
-        ${direction === 'fixed' ? '' : `<section class="ranges"><div class="label">Sweep limits</div>
-          ${direction !== 'vertical' ? this.rangeRow('h', 'Horizontal', this.config.range_left_entity, this.config.range_right_entity, -60, 60) : ''}
-          ${direction !== 'horizontal' ? this.rangeRow('v', 'Vertical', this.config.range_down_entity, this.config.range_up_entity, -30, 90) : ''}
-        </section>`}
-      </ha-card>
-      <div class="modal-layer" role="dialog" aria-modal="true" aria-label="Turn off oscillation">
-        <div class="dialog">
-          <h3>Turn off oscillation?</h3>
-          <p>The fan only accepts manual aiming while it is stopped. Apply this orientation and stop oscillating?</p>
-          <div class="dialog-actions"><button class="cancel">Cancel</button><button class="accept">Turn Off &amp; Aim</button></div>
-        </div>
-      </div>`;
+      </ha-card>`;
     this._lastSignature = this.signature();
     this.bind();
     this.sweepLoop();
@@ -776,6 +745,8 @@ class DreoFanCard extends HTMLElement {
   bind() {
     const $ = s => this.shadowRoot.querySelector(s);
     $('.power').onclick = () => this.call('fan', 'toggle', { entity_id: this.config.entity });
+    const modeDetails = $('.mode-section details');
+    modeDetails.ontoggle = () => { this._modeOpen = modeDetails.open; };
     this.shadowRoot.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => this.call('fan','set_preset_mode',{entity_id:this.config.entity,preset_mode:b.dataset.mode}));
     const speed = $('.speed');
     const ticks = this.shadowRoot.querySelectorAll('.ticks i');
@@ -791,113 +762,196 @@ class DreoFanCard extends HTMLElement {
     this.shadowRoot.querySelectorAll('[data-axis]').forEach(b => b.onclick = async () => this.nudge(b.dataset.axis, Number(b.dataset.delta)));
     this.shadowRoot.querySelectorAll('[data-direction]').forEach(b => b.onclick = () => this.call('select','select_option',{entity_id:this.config.direction_entity,option:b.dataset.direction}));
 
-    this.shadowRoot.querySelectorAll('.range').forEach(row => {
-      const track = row.querySelector('.range-track');
-      const fill = row.querySelector('.range-fill');
-      const handles = { lo: row.querySelector('.lo'), hi: row.querySelector('.hi') };
-      const readout = row.querySelector('.range-val');
-      const axis = row.dataset.axis;
-      const min = Number(row.dataset.min), max = Number(row.dataset.max);
-      const loId = axis === 'h' ? this.config.range_left_entity : this.config.range_down_entity;
-      const hiId = axis === 'h' ? this.config.range_right_entity : this.config.range_up_entity;
-      const b = this.rangeBounds(loId, hiId, min, max);
-      const cur = { lo: b.lo, hi: b.hi };
-      const step = b.step || 5;
-      // The fan refuses a sweep narrower than this and silently widens it a few
-      // seconds later, so the handles are held apart rather than letting the
-      // user set something that will not stick.
-      const span = Math.max(step, Number(this.config.min_sweep ?? 30));
-      const pos = n => ((n - min) / (max - min)) * 100;
-      const valueAt = e => {
-        const r = track.getBoundingClientRect();
-        const t = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-        return Math.max(min, Math.min(max, Math.round((min + t * (max - min)) / step) * step));
-      };
-      const paint = () => {
-        fill.style.left = `${pos(cur.lo)}%`;
-        fill.style.right = `${100 - pos(cur.hi)}%`;
-        handles.lo.style.left = `${pos(cur.lo)}%`;
-        handles.hi.style.left = `${pos(cur.hi)}%`;
-        readout.textContent = `${cur.lo}° to ${cur.hi}°`;
-      };
-      let grabbed = null;
-      track.onpointerdown = e => {
-        if (this._committing) return;
-        const val = valueAt(e);
-        grabbed = Math.abs(val - cur.lo) <= Math.abs(val - cur.hi) ? 'lo' : 'hi';
-        this._dragging = true;
-        track.setPointerCapture(e.pointerId);
-        cur[grabbed] = grabbed === 'lo' ? Math.min(val, cur.hi - span) : Math.max(val, cur.lo + span);
-        paint();
-      };
-      track.onpointermove = e => {
-        if (!grabbed) return;
-        const val = valueAt(e);
-        cur[grabbed] = grabbed === 'lo' ? Math.min(val, cur.hi - span) : Math.max(val, cur.lo + span);
-        paint();
-      };
-      track.onpointerup = async () => {
-        if (!grabbed) return;
-        grabbed = null;
-        this._dragging = false;
-        await this.commitRange(loId, cur.lo, hiId, cur.hi);
-      };
-      track.onpointercancel = () => { grabbed = null; this._dragging = false; this.render(); };
-    });
-
     const pad = $('.angle-pad');
+    const direction = this.direction();
     const locked = this.lockedAxis();
-    const point = e => {
-      const r = pad.getBoundingClientRect();
-      const x = this.padNorm((e.clientX-r.left)/r.width);
-      const y = this.padNormY((e.clientY-r.top)/r.height);
-      return {
-        x, y,
-        h: Math.round((-60 + x*120)/5)*5,
-        v: Math.round((90 - y*120)/5)*5,
-      };
-    };
-    const move = e => {
-      const p = point(e);
-      this._pendingH = p.h;
-      this._pendingV = p.v;
-      const t = $('.target'); t.style.left = `${this.padPos(p.x)}%`; t.style.top = `${this.padPosY(p.y)}%`;
-      $('.angles').innerHTML = `<span>↔ ${this._pendingH}°</span><i></i><span>↕ ${this._pendingV}°</span>`;
-      const svg = $('.fan-svg');
-      if (svg) svg.innerHTML = this.fanSvgBody(this._pendingH, this._pendingV);
-    };
-    pad.onpointerdown = async e => {
+    pad.onpointerdown = e => {
+      if (e.target.closest('.aim-control')) return;
       if (this._committing) return;
-      // Sweeping: a single tap picks the target and prompts to stop first.
       if (locked === 'both') {
-        const p = point(e);
-        if (await this.ensureFixed()) await this.commitOrientation(p.h, p.v, true);
+        const rect = pad.getBoundingClientRect();
+        const railTop = this.padY(90);
+        const verticalBottom = 100 - this.padY(-30);
+        const railHeight = 100 - verticalBottom - railTop;
+        const endpoints = [];
+        if (direction !== 'vertical') {
+          const bar = pad.querySelector('.sweep-h:not(.rail)').getBoundingClientRect();
+          endpoints.push(
+            { axis: 'h', end: 'lo', x: ((bar.left - rect.left) / rect.width) * 100,
+              y: ((bar.top + bar.height / 2 - rect.top) / rect.height) * 100 },
+            { axis: 'h', end: 'hi', x: ((bar.right - rect.left) / rect.width) * 100,
+              y: ((bar.top + bar.height / 2 - rect.top) / rect.height) * 100 },
+          );
+        }
+        if (direction !== 'horizontal') {
+          const bar = pad.querySelector('.sweep-v:not(.rail)').getBoundingClientRect();
+          endpoints.push(
+            { axis: 'v', end: 'lo', x: ((bar.left + bar.width / 2 - rect.left) / rect.width) * 100,
+              y: ((bar.bottom - rect.top) / rect.height) * 100 },
+            { axis: 'v', end: 'hi', x: ((bar.left + bar.width / 2 - rect.left) / rect.width) * 100,
+              y: ((bar.top - rect.top) / rect.height) * 100 },
+          );
+        }
+        const px = ((e.clientX - rect.left) / rect.width) * 100;
+        const py = ((e.clientY - rect.top) / rect.height) * 100;
+        const grabbed = endpoints.reduce((best, item) => {
+          const distance = Math.hypot((item.x - px) * rect.width / 100,
+            (item.y - py) * rect.height / 100);
+          return !best || distance < best.distance ? { ...item, distance } : best;
+        }, null);
+        if (!grabbed) return;
+
+        const axis = grabbed.axis;
+        const loId = axis === 'h' ? this.config.range_left_entity : this.config.range_down_entity;
+        const hiId = axis === 'h' ? this.config.range_right_entity : this.config.range_up_entity;
+        const bounds = this.rangeBounds(loId, hiId, axis === 'h' ? -60 : -30,
+          axis === 'h' ? 60 : 90);
+        const cur = { lo: bounds.lo, hi: bounds.hi };
+        const step = bounds.step || 5;
+        const span = Math.max(step, Number(this.config.min_sweep ?? 30));
+        const active = pad.querySelector(axis === 'h' ? '.sweep-h:not(.rail)' : '.sweep-v:not(.rail)');
+        const valueAt = event => {
+          if (axis === 'h') {
+            const t = this.padNorm((event.clientX - rect.left) / rect.width);
+            return Math.round((-60 + t * 120) / step) * step;
+          }
+          const bottom = ((rect.bottom - event.clientY) / rect.height) * 100;
+          const t = Math.max(0, Math.min(1, (bottom - verticalBottom) / railHeight));
+          return Math.round((-30 + t * 120) / step) * step;
+        };
+        const paintRange = () => {
+          if (axis === 'h') {
+            const a = this.padX(cur.lo), b = this.padX(cur.hi);
+            active.style.left = `${Math.min(a, b)}%`;
+            active.style.width = `${Math.abs(b - a)}%`;
+          } else {
+            const down = ((cur.lo + 30) / 120) * railHeight;
+            const up = ((cur.hi + 30) / 120) * railHeight;
+            active.style.bottom = `${verticalBottom + Math.min(down, up)}%`;
+            active.style.height = `${Math.abs(up - down)}%`;
+          }
+        };
+        const updateRange = event => {
+          const value = Math.max(bounds.min, Math.min(bounds.max, valueAt(event)));
+          cur[grabbed.end] = grabbed.end === 'lo'
+            ? Math.min(value, cur.hi - span)
+            : Math.max(value, cur.lo + span);
+          paintRange();
+          $('.angles').innerHTML = axis === 'h'
+            ? `<span>↔ ${cur[grabbed.end]}°</span>`
+            : `<span>↕ ${cur[grabbed.end]}°</span>`;
+        };
+
+        this._dragging = true;
+        pad.setPointerCapture(e.pointerId);
+        updateRange(e);
+        pad.onpointermove = event => { if (this._dragging) updateRange(event); };
+        pad.onpointerup = async () => {
+          if (!this._dragging) return;
+          this._dragging = false;
+          $('.angles').innerHTML = '';
+          await this.commitRange(loId, cur.lo, hiId, cur.hi);
+        };
+        pad.onpointercancel = () => { this._dragging = false; this.render(); };
         return;
       }
+
+      const rect = pad.getBoundingClientRect();
+      const horizontal = pad.querySelector('.sweep-h.single i').getBoundingClientRect();
+      const vertical = pad.querySelector('.sweep-v.single i').getBoundingClientRect();
+      const handles = [
+        { axis: 'h', x: horizontal.left + horizontal.width / 2,
+          y: horizontal.top + horizontal.height / 2 },
+        { axis: 'v', x: vertical.left + vertical.width / 2,
+          y: vertical.top + vertical.height / 2 },
+      ];
+      const grabbed = handles.reduce((best, item) => {
+        const distance = Math.hypot(item.x - e.clientX, item.y - e.clientY);
+        return !best || distance < best.distance ? { ...item, distance } : best;
+      }, null);
+      if (!grabbed) return;
+
+      const axis = grabbed.axis;
+      const hState = this.state(this.config.horizontal_entity);
+      const vState = this.state(this.config.vertical_entity);
+      const limits = {
+        h: {
+          min: Number(hState?.attributes.min ?? -60),
+          max: Number(hState?.attributes.max ?? 60),
+          step: Number(hState?.attributes.step ?? 5),
+        },
+        v: {
+          min: Number(vState?.attributes.min ?? -30),
+          max: Number(vState?.attributes.max ?? 90),
+          step: Number(vState?.attributes.step ?? 5),
+        },
+      };
+      const cur = { h: this.hAngle(), v: this.vAngle() };
+      const railTop = this.padY(90);
+      const verticalBottom = 100 - this.padY(-30);
+      const railHeight = 100 - verticalBottom - railTop;
+      const valueAt = event => {
+        let raw;
+        if (axis === 'h') {
+          const t = this.padNorm((event.clientX - rect.left) / rect.width);
+          raw = -60 + t * 120;
+        } else {
+          const bottom = ((rect.bottom - event.clientY) / rect.height) * 100;
+          const t = Math.max(0, Math.min(1, (bottom - verticalBottom) / railHeight));
+          raw = -30 + t * 120;
+        }
+        const { min, max, step } = limits[axis];
+        return Math.max(min, Math.min(max, Math.round(raw / step) * step));
+      };
+      const paintManual = event => {
+        cur[axis] = valueAt(event);
+        if (axis === 'h') {
+          const zero = this.padX(0), value = this.padX(cur.h);
+          const bar = pad.querySelector('.sweep-h.single');
+          bar.style.left = `${Math.min(zero, value)}%`;
+          bar.style.width = `${Math.abs(value - zero)}%`;
+          bar.classList.toggle('negative', cur.h < 0);
+        } else {
+          const zero = ((0 + 30) / 120) * railHeight;
+          const value = ((cur.v + 30) / 120) * railHeight;
+          const bar = pad.querySelector('.sweep-v.single');
+          bar.style.bottom = `${verticalBottom + Math.min(zero, value)}%`;
+          bar.style.height = `${Math.abs(value - zero)}%`;
+          bar.classList.toggle('negative', cur.v < 0);
+        }
+        $('.angles').innerHTML = axis === 'h'
+          ? `<span>↔ ${cur.h}°</span>`
+          : `<span>↕ ${cur.v}°</span>`;
+        const svg = $('.fan-svg');
+        if (svg) svg.innerHTML = this.fanSvgBody(cur.h, cur.v);
+      };
+
       this._dragging = true;
       pad.setPointerCapture(e.pointerId);
-      move(e);
+      paintManual(e);
+      pad.onpointermove = event => { if (this._dragging) paintManual(event); };
+      pad.onpointerup = async () => {
+        if (!this._dragging) return;
+        this._dragging = false;
+        $('.angles').innerHTML = '';
+        await this.commitOrientation(cur.h, cur.v, true);
+      };
+      pad.onpointercancel = () => { this._dragging = false; this.render(); };
     };
-    pad.onpointermove = e => { if (this._dragging) move(e); };
-    pad.onpointerup = async () => {
-      if (!this._dragging) return;
-      this._dragging = false;
-      await this.commitOrientation(this._pendingH, this._pendingV);
-    };
-    pad.onpointercancel = () => { this._dragging = false; this.render(); };
   }
 
   styles() { return `
-    :host{--blue:#2f79ff;--sweep:#5aa9ff;--range-width:60%;display:block;font-family:var(--ha-card-header-font-family,system-ui)}
+    :host{--blue:#2f79ff;--sweep:#5aa9ff;display:block;font-family:var(--ha-card-header-font-family,system-ui)}
     *{box-sizing:border-box} .card{padding:14px 16px 16px;color:var(--primary-text-color);background:linear-gradient(145deg,rgba(50,54,60,.98),rgba(25,27,30,.98));border-radius:22px;overflow:hidden}
     header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px} h2{margin:0 0 2px;font-size:19px;font-weight:600} p{margin:0;font-size:12px;color:var(--secondary-text-color)}
     button{font:inherit;color:inherit;border:0;cursor:pointer;-webkit-tap-highlight-color:transparent}.power{width:42px;height:42px;border-radius:50%;background:#45494f;display:grid;place-items:center}.on .power{background:var(--blue);color:white}.power ha-icon{--mdc-icon-size:22px}
     button:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
-    section{margin-top:12px}.label{font-size:12px;color:#c5c8cc;margin-bottom:6px}.label small{display:block;margin-top:1px;color:var(--blue);font-size:10px}.modes,.segments{display:flex;gap:4px;padding:3px;background:#202226;border-radius:13px;overflow-x:auto}.mode,.segments button{flex:1;min-width:max-content;padding:7px 10px;border-radius:10px;font-size:12px;background:transparent;color:#aeb1b5}.mode.active,.segments button.active{background:#f5f5f6;color:#202124;font-weight:600}
+    section{margin-top:12px}.label{font-size:12px;color:#c5c8cc;margin-bottom:6px}.modes,.segments{display:flex;gap:4px;padding:3px;background:#202226;border-radius:13px;overflow-x:auto}.mode,.segments button{flex:1;min-width:max-content;padding:7px 10px;border-radius:10px;font-size:12px;background:transparent;color:#aeb1b5}.mode.active,.segments button.active{background:#f5f5f6;color:#202124;font-weight:600}
+    .mode-section summary{display:flex;align-items:center;justify-content:space-between;list-style:none;cursor:pointer;-webkit-tap-highlight-color:transparent}.mode-section summary::-webkit-details-marker{display:none}.mode-section summary .label{margin-bottom:0}.mode-summary{display:flex;align-items:center;gap:3px;color:var(--blue);font-size:12px}.mode-summary ha-icon{--mdc-icon-size:18px;transition:transform .18s ease}.mode-section details[open] .mode-summary ha-icon{transform:rotate(180deg)}.mode-section .modes{margin-top:6px}
     .speed-row{display:grid;grid-template-columns:auto auto 1fr;align-items:center;gap:10px}.speed-row .label{margin-bottom:0}.speed-row strong{font-size:17px;line-height:1;color:var(--blue)}.speed-row strong small{font-size:11px;color:#8a8f96}
     .slider-wrap{position:relative;padding-bottom:8px}input[type=range]{display:block;width:100%;margin:0;accent-color:var(--blue)}.ticks{position:absolute;left:8px;right:8px;bottom:0;height:6px}.ticks i{position:absolute;width:2px;height:6px;margin-left:-1px;border-radius:1px;background:#4a4f56}.ticks i.on{background:var(--blue)}
-    .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}.section-head .label{margin-bottom:0}.angles{display:flex;align-items:center;gap:8px;color:var(--blue);font-size:13px}.angles i{height:14px;width:1px;background:#62666d}
-    .angle-pad{height:236px;position:relative;overflow:hidden;border-radius:16px;background:radial-gradient(ellipse at 50% 82%,#34404f 0,#24282e 30%,#17191d 72%);touch-action:none;border:1px solid #373b41}.grid-lines{position:absolute;inset:12px;background:linear-gradient(90deg,transparent 49.8%,#30343a 50%,transparent 50.2%),linear-gradient(0deg,transparent 49.8%,#30343a 50%,transparent 50.2%)}
+    .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}.section-head .label{display:flex;align-items:center;gap:6px;margin-bottom:0;white-space:nowrap}.section-head .sending{color:var(--blue);font-size:10px;line-height:1}.angles{display:none;align-items:center;gap:8px;color:#fff;font-size:16px;font-weight:700;line-height:1;text-shadow:0 1px 3px rgba(0,0,0,.7)}.angles:not(:empty){display:flex}.angles i{height:14px;width:1px;background:#62666d}
+    .angle-pad{height:236px;position:relative;overflow:hidden;border-radius:16px;background:radial-gradient(ellipse at 50% 82%,#34404f 0,#24282e 30%,#17191d 72%);touch-action:none;border:1px solid #373b41;cursor:grab}.angle-pad:active{cursor:grabbing}.grid-lines{position:absolute;inset:12px;background:linear-gradient(90deg,transparent 49.8%,#30343a 50%,transparent 50.2%),linear-gradient(0deg,transparent 49.8%,#30343a 50%,transparent 50.2%)}
 
     /* --- fan model: SVG cylinder, geometry computed in fanSvgBody --- */
     .fan-stage{position:absolute;z-index:1;left:50%;top:44%;width:100%;height:88%;max-width:210px;transform:translate(-50%,-50%)}
@@ -907,21 +961,22 @@ class DreoFanCard extends HTMLElement {
     .fan-svg .blades{transform-box:fill-box;transform-origin:center}
     .on .fan-svg .blades{animation:blade-motion 1.1s linear infinite}
     @keyframes blade-motion{to{transform:rotate(360deg)}}
-    .target{position:absolute;width:36px;height:36px;border-radius:50%;border:3px solid var(--blue);background:rgba(55,59,66,.75);transform:translate(-50%,-50%);display:grid;place-items:center;box-shadow:0 0 0 5px rgba(47,121,255,.1)}.target span{width:14px;height:14px;border-radius:50%;background:var(--blue)}.hint{text-align:center;margin-top:5px;color:#858a91;font-size:11px}
-    .manual{display:grid;grid-template-columns:1fr auto;align-items:center;gap:10px}.manual>.label{margin-bottom:0}.dpad{width:112px;height:112px;border-radius:50%;background:#44484e;display:grid;grid-template:1fr 28px 1fr/1fr 28px 1fr;overflow:hidden}.dpad button{background:transparent;display:grid;place-items:center}.dpad button:active{background:#555b63}.dpad ha-icon{--mdc-icon-size:22px}.up{grid-area:1/2}.left{grid-area:2/1}.center{grid-area:2/2;border-radius:50%;background:#5c6169}.right{grid-area:2/3}.down{grid-area:3/2}
-    .ranges .range{width:var(--range-width);margin:8px auto 0}.range-head{display:flex;justify-content:space-between;font-size:11px;color:#aeb1b5;margin-bottom:5px}.range-val{color:var(--blue)}
-    .range-track{position:relative;height:26px;touch-action:none;cursor:pointer}.range-track:before{content:'';position:absolute;left:0;right:0;top:11px;height:4px;border-radius:2px;background:#3a3e45}.range-fill{position:absolute;top:11px;height:4px;border-radius:2px;background:var(--blue)}.range-handle{position:absolute;top:4px;width:18px;height:18px;margin-left:-9px;border-radius:50%;background:#f5f5f6;box-shadow:0 1px 4px rgba(0,0,0,.5)}
-    .sweep-h,.sweep-v{position:absolute;z-index:3;background:var(--sweep);border-radius:1px;pointer-events:none;filter:drop-shadow(0 0 5px rgba(90,169,255,.5))}
+    .hint{text-align:center;margin-top:5px;color:#858a91;font-size:11px}
+    .aim-control{position:absolute;z-index:5;top:10px;left:10px;width:112px;height:112px;border:1px solid rgba(255,255,255,.14);border-radius:16px;background:linear-gradient(145deg,rgba(61,68,78,.88),rgba(31,35,41,.9));box-shadow:inset 0 1px 0 rgba(255,255,255,.1),0 8px 20px rgba(0,0,0,.3);backdrop-filter:blur(7px);overflow:hidden;touch-action:manipulation}.aim-control button{position:absolute;inset:4px;display:block;background:rgba(255,255,255,.025);color:#d6dbe2;transition:background .12s ease,color .12s ease;touch-action:manipulation}.aim-control button:hover{background:rgba(255,255,255,.1);color:#fff}.aim-control button:active{background:rgba(47,121,255,.42);color:#fff}.aim-control button ha-icon{position:absolute;--mdc-icon-size:27px;filter:drop-shadow(0 1px 2px rgba(0,0,0,.5))}.aim-up{clip-path:polygon(0 0,100% 0,62% 38%,38% 38%)}.aim-up ha-icon{top:7px;left:50%;transform:translateX(-50%)}.aim-right{clip-path:polygon(100% 0,100% 100%,62% 62%,62% 38%)}.aim-right ha-icon{top:50%;right:7px;transform:translateY(-50%)}.aim-down{clip-path:polygon(0 100%,100% 100%,62% 62%,38% 62%)}.aim-down ha-icon{bottom:7px;left:50%;transform:translateX(-50%)}.aim-left{clip-path:polygon(0 0,38% 38%,38% 62%,0 100%)}.aim-left ha-icon{top:50%;left:7px;transform:translateY(-50%)}.aim-center{position:absolute;z-index:2;left:50%;top:50%;width:32px;height:32px;display:grid;place-items:center;transform:translate(-50%,-50%);border:1px solid rgba(255,255,255,.13);border-radius:9px;background:linear-gradient(145deg,#4b525c,#30353c);color:#8f98a4;box-shadow:0 2px 7px rgba(0,0,0,.35);pointer-events:none}.aim-center ha-icon{--mdc-icon-size:17px}
+    .sweep-h,.sweep-v{position:absolute;z-index:3;background:var(--sweep);border-radius:2px;pointer-events:none;filter:drop-shadow(0 0 5px rgba(90,169,255,.5))}
     .sweep-h.rail,.sweep-v.rail{background:rgba(255,255,255,.14);filter:none;z-index:2}
-    .sweep-h i,.sweep-v i{position:absolute;background:var(--sweep);border-radius:1px}
-    .sweep-h{height:2px;bottom:5.5%}
-    .sweep-h i{top:-6px;width:2px;height:14px}
-    .sweep-h i:first-child{left:0}.sweep-h i:last-child{right:0}
-    .sweep-v{width:2px}
-    .sweep-v i{left:-6px;width:14px;height:2px}
-    .sweep-v i:first-child{top:0}.sweep-v i:last-child{bottom:0}
-    .modal-layer{position:fixed;z-index:9999;inset:0;display:none;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.62);backdrop-filter:blur(5px)}.modal-layer.show{display:flex}.dialog{width:min(360px,100%);padding:20px;border-radius:20px;background:#30343a;color:#f5f6f7;box-shadow:0 20px 55px rgba(0,0,0,.5)}.dialog h3{margin:0 0 8px;font-size:18px}.dialog p{margin:0;font-size:13px;color:#c4c7cc;line-height:1.45}.dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}.dialog-actions button{padding:9px 13px;border-radius:11px;background:#454a51;font-size:13px}.dialog-actions .accept{background:var(--blue);color:white;font-weight:600}
-    @media(max-width:420px){.card{padding:12px}.angle-pad{height:218px}.dpad{width:100px;height:100px;grid-template:1fr 26px 1fr/1fr 26px 1fr}.segments button{font-size:11px;padding:7px 6px}}
+    .sweep-h i,.sweep-v i{position:absolute;width:18px;height:18px;border:1px solid #d9dde2;border-radius:50%;background:#f5f5f6;box-shadow:0 1px 4px rgba(0,0,0,.55)}
+    .sweep-h{height:4px;bottom:5.5%}
+    .sweep-h i{top:50%}.sweep-h i:first-child{left:0;transform:translate(-50%,-50%)}.sweep-h i:last-child{right:0;transform:translate(50%,-50%)}
+    .sweep-h.single i{left:auto;right:0;transform:translate(50%,-50%)}.sweep-h.single.negative i{left:0;right:auto;transform:translate(-50%,-50%)}
+    .sweep-v{width:4px}
+    .sweep-v i{left:50%}.sweep-v i:first-child{top:0;transform:translate(-50%,-50%)}.sweep-v i:last-child{bottom:0;transform:translate(-50%,50%)}
+    .sweep-v.single i{top:0;bottom:auto;transform:translate(-50%,-50%)}.sweep-v.single.negative i{top:auto;bottom:0;transform:translate(-50%,50%)}
+    .sweep-tick{position:absolute;z-index:2;pointer-events:none;background:rgba(220,225,231,.34)}
+    .sweep-tick span{position:absolute;color:#c9cfd7;font-size:11px;font-weight:500;line-height:1;letter-spacing:.1px;white-space:nowrap;text-shadow:0 1px 3px #090b0e,0 0 3px #17191d}
+    .sweep-tick.h{width:1px;height:10px}.sweep-tick.h span{left:50%;top:-16px;transform:translateX(-50%)}
+    .sweep-tick.v{width:10px;height:1px}.sweep-tick.v span{left:14px;top:50%;transform:translateY(-50%)}
+    @media(max-width:420px){.card{padding:12px}.angle-pad{height:218px}.aim-control{top:8px;left:8px;width:108px;height:108px}.segments button{font-size:11px;padding:7px 6px}}
     @media(prefers-reduced-motion:reduce){.on .grille{animation:none}}
   `; }
 }
