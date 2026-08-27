@@ -78,5 +78,5 @@ node --check dreo-fan-card-loader.js
 
 ## Status
 
-This project is in active development. The current defaults and behavior have been tuned for one Dreo air-circulator setup, so reports from other models and integrations are welcome.
+This project is in active development. Its defaults and behavior are designed and tested for the Dreo air circulator I own. Support for other models is not currently planned, but the community is welcome to adapt or extend this project for them. 
 
