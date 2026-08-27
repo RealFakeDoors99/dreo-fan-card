@@ -372,25 +372,30 @@ class DreoFanCard extends HTMLElement {
   sweepOverlay(direction) {
     if (direction === 'fixed') return '';
     let out = '';
+    const originX = this.padX(-60);
+    const originBottom = Number(this.config.sweep_origin_bottom ?? 5.5);
     if (direction !== 'vertical') {
       // full mechanical range as the dim rail
-      const ra = this.padX(-60), rb = this.padX(60);
-      out += `<div class="sweep-h rail" style="left:${ra.toFixed(2)}%;width:${(rb-ra).toFixed(2)}%"></div>`;
+      const ra = originX, rb = this.padX(60);
+      out += `<div class="sweep-h rail" style="left:${ra.toFixed(2)}%;width:${(rb-ra).toFixed(2)}%;`
+        + `bottom:${originBottom}%"></div>`;
       // active sweep as the bright fill with T-caps
       const a = this.padX(this.sweepLeft()), b = this.padX(this.sweepRight());
       out += `<div class="sweep-h" style="left:${Math.min(a,b).toFixed(2)}%;`
-        + `width:${Math.abs(b-a).toFixed(2)}%"><i></i><i></i></div>`;
+        + `width:${Math.abs(b-a).toFixed(2)}%;bottom:${originBottom}%"><i></i><i></i></div>`;
     }
     if (direction !== 'horizontal') {
-      const side = this.hAngle() < 0 ? 'left' : 'right';
-      // full mechanical range
-      const ra = this.padY(90), rb = this.padY(-30);
-      out += `<div class="sweep-v rail ${side}" style="top:${Math.min(ra,rb).toFixed(2)}%;`
-        + `height:${Math.abs(rb-ra).toFixed(2)}%"></div>`;
-      // active sweep
-      const a = this.padY(this.sweepUp()), b = this.padY(this.sweepDown());
-      out += `<div class="sweep-v ${side}" style="top:${Math.min(a,b).toFixed(2)}%;`
-        + `height:${Math.abs(b-a).toFixed(2)}%"><i></i><i></i></div>`;
+      // Share the horizontal rail's lower-left origin, then map the vertical
+      // range upward from -30 to 90 degrees.
+      const railTop = this.padY(90);
+      const railHeight = 100 - originBottom - railTop;
+      const fromBottom = value => ((value + 30) / 120) * railHeight;
+      out += `<div class="sweep-v rail" style="left:${originX.toFixed(2)}%;bottom:${originBottom}%;`
+        + `height:${railHeight.toFixed(2)}%"></div>`;
+      const down = fromBottom(this.sweepDown()), up = fromBottom(this.sweepUp());
+      out += `<div class="sweep-v" style="left:${originX.toFixed(2)}%;`
+        + `bottom:${(originBottom + Math.min(down,up)).toFixed(2)}%;`
+        + `height:${Math.abs(up-down).toFixed(2)}%"><i></i><i></i></div>`;
     }
     return out;
   }
@@ -883,7 +888,7 @@ class DreoFanCard extends HTMLElement {
   }
 
   styles() { return `
-    :host{--blue:#2f79ff;--sweep:#5aa9ff;--nest:97px;--range-width:60%;display:block;font-family:var(--ha-card-header-font-family,system-ui)}
+    :host{--blue:#2f79ff;--sweep:#5aa9ff;--range-width:60%;display:block;font-family:var(--ha-card-header-font-family,system-ui)}
     *{box-sizing:border-box} .card{padding:14px 16px 16px;color:var(--primary-text-color);background:linear-gradient(145deg,rgba(50,54,60,.98),rgba(25,27,30,.98));border-radius:22px;overflow:hidden}
     header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px} h2{margin:0 0 2px;font-size:19px;font-weight:600} p{margin:0;font-size:12px;color:var(--secondary-text-color)}
     button{font:inherit;color:inherit;border:0;cursor:pointer;-webkit-tap-highlight-color:transparent}.power{width:42px;height:42px;border-radius:50%;background:#45494f;display:grid;place-items:center}.on .power{background:var(--blue);color:white}.power ha-icon{--mdc-icon-size:22px}
@@ -912,12 +917,11 @@ class DreoFanCard extends HTMLElement {
     .sweep-h{height:2px;bottom:5.5%}
     .sweep-h i{top:-6px;width:2px;height:14px}
     .sweep-h i:first-child{left:0}.sweep-h i:last-child{right:0}
-    .sweep-v{width:2px;left:min(calc(50% + var(--nest)),calc(100% - 14px))}
-    .sweep-v.left{left:max(calc(50% - var(--nest)),14px)}
+    .sweep-v{width:2px}
     .sweep-v i{left:-6px;width:14px;height:2px}
     .sweep-v i:first-child{top:0}.sweep-v i:last-child{bottom:0}
     .modal-layer{position:fixed;z-index:9999;inset:0;display:none;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.62);backdrop-filter:blur(5px)}.modal-layer.show{display:flex}.dialog{width:min(360px,100%);padding:20px;border-radius:20px;background:#30343a;color:#f5f6f7;box-shadow:0 20px 55px rgba(0,0,0,.5)}.dialog h3{margin:0 0 8px;font-size:18px}.dialog p{margin:0;font-size:13px;color:#c4c7cc;line-height:1.45}.dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}.dialog-actions button{padding:9px 13px;border-radius:11px;background:#454a51;font-size:13px}.dialog-actions .accept{background:var(--blue);color:white;font-weight:600}
-    @media(max-width:420px){.card{padding:12px}.angle-pad{height:218px}:host{--nest:86px}.dpad{width:100px;height:100px;grid-template:1fr 26px 1fr/1fr 26px 1fr}.segments button{font-size:11px;padding:7px 6px}}
+    @media(max-width:420px){.card{padding:12px}.angle-pad{height:218px}.dpad{width:100px;height:100px;grid-template:1fr 26px 1fr/1fr 26px 1fr}.segments button{font-size:11px;padding:7px 6px}}
     @media(prefers-reduced-motion:reduce){.on .grille{animation:none}}
   `; }
 }
