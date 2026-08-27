@@ -26,7 +26,7 @@ class DreoFanCard extends HTMLElement {
     if (signature !== this._lastSignature) this.render();
   }
 
-  getCardSize() { return 7; }
+  getCardSize() { return 9; }
 
   state(id) { return this._hass?.states[id]; }
   value(id, fallback = 0) {
@@ -192,22 +192,11 @@ class DreoFanCard extends HTMLElement {
     return 9;
   }
 
-  // Angle entities are ignored while the fan is off, so aiming must power it on first.
+  // Controls never power the fan implicitly. The dedicated power button is the
+  // only way to turn it on, which prevents an accidental slider touch from
+  // reactivating an idle fan.
   async ensureOn() {
-    if (this.state(this.config.entity)?.state === 'on') return true;
-    this._committing = true;
-    this.render();
-    try {
-      await this.call('fan', 'turn_on', {
-        entity_id: this.config.entity,
-        percentage: Math.round(100 / this.speedCount()),
-      });
-      if (!await this.waitForState(this.config.entity, 'on', 8000)) return false;
-      await this.sleep(Number(this.config.command_settle_ms));
-      return true;
-    } finally {
-      this._committing = false;
-    }
+    return this.state(this.config.entity)?.state === 'on';
   }
 
   async ensureFixed() {
@@ -339,8 +328,11 @@ class DreoFanCard extends HTMLElement {
       const ra = originX, rb = this.padX(60);
       out += `<div class="sweep-h rail" style="left:${ra.toFixed(2)}%;width:${(rb-ra).toFixed(2)}%;`
         + `bottom:${originBottom}%"></div>`;
-      out += ticks(-60, 60, 30).map(value => `<div class="sweep-tick h" style="left:${this.padX(value).toFixed(2)}%;`
-        + `bottom:calc(${originBottom}% - 3px)"><span>${value}°</span></div>`).join('');
+      out += ticks(-60, 60, 15).map(value => {
+        const minor = value % 30 !== 0;
+        return `<div class="sweep-tick h${minor ? ' minor' : ''}" style="left:${this.padX(value).toFixed(2)}%;`
+          + `bottom:calc(${originBottom}% - ${minor ? 2 : 5}px)"><span>${value}°</span></div>`;
+      }).join('');
       if (manual) {
         const angle = this._optimistic?.h ?? this.hAngle();
         const zero = this.padX(0), value = this.padX(angle);
@@ -362,8 +354,11 @@ class DreoFanCard extends HTMLElement {
       const fromBottom = value => ((value + 30) / 120) * railHeight;
       out += `<div class="sweep-v rail" style="left:${verticalX.toFixed(2)}%;bottom:${verticalBottom.toFixed(2)}%;`
         + `height:${railHeight.toFixed(2)}%"></div>`;
-      out += ticks(-30, 90, 30).map(value => `<div class="sweep-tick v" style="left:calc(${verticalX.toFixed(2)}% - 3px);`
-        + `bottom:${(verticalBottom + fromBottom(value)).toFixed(2)}%"><span>${value}°</span></div>`).join('');
+      out += ticks(-30, 90, 15).map(value => {
+        const minor = value % 30 !== 0;
+        return `<div class="sweep-tick v${minor ? ' minor' : ''}" style="left:calc(${verticalX.toFixed(2)}% - ${minor ? 2 : 5}px);`
+          + `bottom:${(verticalBottom + fromBottom(value)).toFixed(2)}%"><span>${value}°</span></div>`;
+      }).join('');
       if (manual) {
         const angle = this._optimistic?.v ?? this.vAngle();
         const zero = fromBottom(0), value = fromBottom(angle);
@@ -727,7 +722,6 @@ class DreoFanCard extends HTMLElement {
               <button class="aim-left" data-axis="h" data-delta="-5" aria-label="Aim left"><ha-icon icon="mdi:chevron-left"></ha-icon></button>
               <button class="aim-right" data-axis="h" data-delta="5" aria-label="Aim right"><ha-icon icon="mdi:chevron-right"></ha-icon></button>
               <button class="aim-down" data-axis="v" data-delta="-5" aria-label="Aim down"><ha-icon icon="mdi:chevron-down"></ha-icon></button>
-              <div class="aim-center" aria-hidden="true"><ha-icon icon="mdi:crosshairs"></ha-icon></div>
             </div>` : ''}
           </div>
           <div class="hint">${hint}</div>
@@ -737,6 +731,12 @@ class DreoFanCard extends HTMLElement {
           ${[['fixed','Off'],['horizontal','Horizontal'],['vertical','Vertical'],['both','3D']].map(([x,l]) => `<button data-direction="${x}" class="${direction===x?'active':''}">${l}</button>`).join('')}
         </div></section>
       </ha-card>`;
+    if (!on) {
+      this.shadowRoot.querySelectorAll('section').forEach(section => { section.inert = true; });
+      this.shadowRoot.querySelectorAll('section button, section input').forEach(control => {
+        control.disabled = true;
+      });
+    }
     this._lastSignature = this.signature();
     this.bind();
     this.sweepLoop();
@@ -745,6 +745,7 @@ class DreoFanCard extends HTMLElement {
   bind() {
     const $ = s => this.shadowRoot.querySelector(s);
     $('.power').onclick = () => this.call('fan', 'toggle', { entity_id: this.config.entity });
+    if (this.state(this.config.entity)?.state !== 'on') return;
     const modeDetails = $('.mode-section details');
     modeDetails.ontoggle = () => { this._modeOpen = modeDetails.open; };
     this.shadowRoot.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => this.call('fan','set_preset_mode',{entity_id:this.config.entity,preset_mode:b.dataset.mode}));
@@ -943,18 +944,18 @@ class DreoFanCard extends HTMLElement {
   styles() { return `
     :host{--blue:#2f79ff;--sweep:#5aa9ff;display:block;font-family:var(--ha-card-header-font-family,system-ui)}
     *{box-sizing:border-box} .card{padding:14px 16px 16px;color:var(--primary-text-color);background:linear-gradient(145deg,rgba(50,54,60,.98),rgba(25,27,30,.98));border-radius:22px;overflow:hidden}
-    header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px} h2{margin:0 0 2px;font-size:19px;font-weight:600} p{margin:0;font-size:12px;color:var(--secondary-text-color)}
+    header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px} h2{margin:0 0 2px;font-size:19px;font-weight:600} p{margin:0;font-size:12px;color:var(--secondary-text-color)}.off header>div{opacity:.5;filter:grayscale(1)}
     button{font:inherit;color:inherit;border:0;cursor:pointer;-webkit-tap-highlight-color:transparent}.power{width:42px;height:42px;border-radius:50%;background:#45494f;display:grid;place-items:center}.on .power{background:var(--blue);color:white}.power ha-icon{--mdc-icon-size:22px}
     button:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
-    section{margin-top:12px}.label{font-size:12px;color:#c5c8cc;margin-bottom:6px}.modes,.segments{display:flex;gap:4px;padding:3px;background:#202226;border-radius:13px;overflow-x:auto}.mode,.segments button{flex:1;min-width:max-content;padding:7px 10px;border-radius:10px;font-size:12px;background:transparent;color:#aeb1b5}.mode.active,.segments button.active{background:#f5f5f6;color:#202124;font-weight:600}
+    section{margin-top:12px}.off section{opacity:.4;filter:grayscale(1);pointer-events:none;user-select:none}.off section button,.off section input{cursor:not-allowed}.label{font-size:12px;color:#c5c8cc;margin-bottom:6px}.modes,.segments{display:flex;gap:4px;padding:3px;background:#202226;border-radius:13px;overflow-x:auto}.mode,.segments button{flex:1;min-width:max-content;padding:7px 10px;border-radius:10px;font-size:12px;background:transparent;color:#aeb1b5}.mode.active,.segments button.active{background:#f5f5f6;color:#202124;font-weight:600}
     .mode-section summary{display:flex;align-items:center;justify-content:space-between;list-style:none;cursor:pointer;-webkit-tap-highlight-color:transparent}.mode-section summary::-webkit-details-marker{display:none}.mode-section summary .label{margin-bottom:0}.mode-summary{display:flex;align-items:center;gap:3px;color:var(--blue);font-size:12px}.mode-summary ha-icon{--mdc-icon-size:18px;transition:transform .18s ease}.mode-section details[open] .mode-summary ha-icon{transform:rotate(180deg)}.mode-section .modes{margin-top:6px}
     .speed-row{display:grid;grid-template-columns:auto auto 1fr;align-items:center;gap:10px}.speed-row .label{margin-bottom:0}.speed-row strong{font-size:17px;line-height:1;color:var(--blue)}.speed-row strong small{font-size:11px;color:#8a8f96}
     .slider-wrap{position:relative;padding-bottom:8px}input[type=range]{display:block;width:100%;margin:0;accent-color:var(--blue)}.ticks{position:absolute;left:8px;right:8px;bottom:0;height:6px}.ticks i{position:absolute;width:2px;height:6px;margin-left:-1px;border-radius:1px;background:#4a4f56}.ticks i.on{background:var(--blue)}
     .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}.section-head .label{display:flex;align-items:center;gap:6px;margin-bottom:0;white-space:nowrap}.section-head .sending{color:var(--blue);font-size:10px;line-height:1}.angles{display:none;align-items:center;gap:8px;color:#fff;font-size:16px;font-weight:700;line-height:1;text-shadow:0 1px 3px rgba(0,0,0,.7)}.angles:not(:empty){display:flex}.angles i{height:14px;width:1px;background:#62666d}
-    .angle-pad{height:236px;position:relative;overflow:hidden;border-radius:16px;background:radial-gradient(ellipse at 50% 82%,#34404f 0,#24282e 30%,#17191d 72%);touch-action:none;border:1px solid #373b41;cursor:grab}.angle-pad:active{cursor:grabbing}.grid-lines{position:absolute;inset:12px;background:linear-gradient(90deg,transparent 49.8%,#30343a 50%,transparent 50.2%),linear-gradient(0deg,transparent 49.8%,#30343a 50%,transparent 50.2%)}
+    .angle-pad{height:320px;position:relative;overflow:hidden;border-radius:16px;background:radial-gradient(ellipse at 50% 82%,#34404f 0,#24282e 30%,#17191d 72%);touch-action:none;border:1px solid #373b41;cursor:grab}.angle-pad:active{cursor:grabbing}.grid-lines{position:absolute;inset:12px;background:linear-gradient(90deg,transparent 49.8%,#30343a 50%,transparent 50.2%),linear-gradient(0deg,transparent 49.8%,#30343a 50%,transparent 50.2%)}
 
     /* --- fan model: SVG cylinder, geometry computed in fanSvgBody --- */
-    .fan-stage{position:absolute;z-index:1;left:50%;top:44%;width:100%;height:88%;max-width:210px;transform:translate(-50%,-50%)}
+    .fan-stage{position:absolute;z-index:1;left:50%;top:44%;width:100%;height:90%;max-width:250px;transform:translate(-50%,-50%)}
     .fan-svg{width:100%;height:100%;display:block;overflow:visible}
     .fan-svg .ring{stroke:rgba(190,201,212,.4);stroke-width:.85}
     .fan-svg .rib{stroke:rgba(206,216,226,.5);stroke-width:2.2;stroke-linecap:round}
@@ -962,7 +963,7 @@ class DreoFanCard extends HTMLElement {
     .on .fan-svg .blades{animation:blade-motion 1.1s linear infinite}
     @keyframes blade-motion{to{transform:rotate(360deg)}}
     .hint{text-align:center;margin-top:5px;color:#858a91;font-size:11px}
-    .aim-control{position:absolute;z-index:5;top:10px;left:10px;width:112px;height:112px;border:1px solid rgba(255,255,255,.14);border-radius:16px;background:linear-gradient(145deg,rgba(61,68,78,.88),rgba(31,35,41,.9));box-shadow:inset 0 1px 0 rgba(255,255,255,.1),0 8px 20px rgba(0,0,0,.3);backdrop-filter:blur(7px);overflow:hidden;touch-action:manipulation}.aim-control button{position:absolute;inset:4px;display:block;background:rgba(255,255,255,.025);color:#d6dbe2;transition:background .12s ease,color .12s ease;touch-action:manipulation}.aim-control button:hover{background:rgba(255,255,255,.1);color:#fff}.aim-control button:active{background:rgba(47,121,255,.42);color:#fff}.aim-control button ha-icon{position:absolute;--mdc-icon-size:27px;filter:drop-shadow(0 1px 2px rgba(0,0,0,.5))}.aim-up{clip-path:polygon(0 0,100% 0,62% 38%,38% 38%)}.aim-up ha-icon{top:7px;left:50%;transform:translateX(-50%)}.aim-right{clip-path:polygon(100% 0,100% 100%,62% 62%,62% 38%)}.aim-right ha-icon{top:50%;right:7px;transform:translateY(-50%)}.aim-down{clip-path:polygon(0 100%,100% 100%,62% 62%,38% 62%)}.aim-down ha-icon{bottom:7px;left:50%;transform:translateX(-50%)}.aim-left{clip-path:polygon(0 0,38% 38%,38% 62%,0 100%)}.aim-left ha-icon{top:50%;left:7px;transform:translateY(-50%)}.aim-center{position:absolute;z-index:2;left:50%;top:50%;width:32px;height:32px;display:grid;place-items:center;transform:translate(-50%,-50%);border:1px solid rgba(255,255,255,.13);border-radius:9px;background:linear-gradient(145deg,#4b525c,#30353c);color:#8f98a4;box-shadow:0 2px 7px rgba(0,0,0,.35);pointer-events:none}.aim-center ha-icon{--mdc-icon-size:17px}
+    .aim-control{position:absolute;z-index:5;top:9px;left:9px;width:100px;height:100px;border:1px solid rgba(255,255,255,.14);border-radius:15px;background:linear-gradient(145deg,rgba(61,68,78,.88),rgba(31,35,41,.9));box-shadow:inset 0 1px 0 rgba(255,255,255,.1),0 8px 20px rgba(0,0,0,.3);backdrop-filter:blur(7px);overflow:hidden;touch-action:manipulation}.aim-control button{position:absolute;inset:4px;display:block;background:rgba(255,255,255,.025);color:#d6dbe2;transition:background .12s ease,color .12s ease;touch-action:manipulation}.aim-control button:hover{background:rgba(255,255,255,.1);color:#fff}.aim-control button:active{background:rgba(47,121,255,.42);color:#fff}.aim-control button ha-icon{position:absolute;--mdc-icon-size:25px;filter:drop-shadow(0 1px 2px rgba(0,0,0,.5))}.aim-up{clip-path:polygon(0 0,100% 0,50% 50%)}.aim-up ha-icon{top:6px;left:50%;transform:translateX(-50%)}.aim-right{clip-path:polygon(100% 0,100% 100%,50% 50%)}.aim-right ha-icon{top:50%;right:6px;transform:translateY(-50%)}.aim-down{clip-path:polygon(0 100%,100% 100%,50% 50%)}.aim-down ha-icon{bottom:6px;left:50%;transform:translateX(-50%)}.aim-left{clip-path:polygon(0 0,50% 50%,0 100%)}.aim-left ha-icon{top:50%;left:6px;transform:translateY(-50%)}
     .sweep-h,.sweep-v{position:absolute;z-index:3;background:var(--sweep);border-radius:2px;pointer-events:none;filter:drop-shadow(0 0 5px rgba(90,169,255,.5))}
     .sweep-h.rail,.sweep-v.rail{background:rgba(255,255,255,.14);filter:none;z-index:2}
     .sweep-h i,.sweep-v i{position:absolute;width:18px;height:18px;border:1px solid #d9dde2;border-radius:50%;background:#f5f5f6;box-shadow:0 1px 4px rgba(0,0,0,.55)}
@@ -972,11 +973,12 @@ class DreoFanCard extends HTMLElement {
     .sweep-v{width:4px}
     .sweep-v i{left:50%}.sweep-v i:first-child{top:0;transform:translate(-50%,-50%)}.sweep-v i:last-child{bottom:0;transform:translate(-50%,50%)}
     .sweep-v.single i{top:0;bottom:auto;transform:translate(-50%,-50%)}.sweep-v.single.negative i{top:auto;bottom:0;transform:translate(-50%,50%)}
-    .sweep-tick{position:absolute;z-index:2;pointer-events:none;background:rgba(220,225,231,.34)}
-    .sweep-tick span{position:absolute;color:#c9cfd7;font-size:11px;font-weight:500;line-height:1;letter-spacing:.1px;white-space:nowrap;text-shadow:0 1px 3px #090b0e,0 0 3px #17191d}
-    .sweep-tick.h{width:1px;height:10px}.sweep-tick.h span{left:50%;top:-16px;transform:translateX(-50%)}
-    .sweep-tick.v{width:10px;height:1px}.sweep-tick.v span{left:14px;top:50%;transform:translateY(-50%)}
-    @media(max-width:420px){.card{padding:12px}.angle-pad{height:218px}.aim-control{top:8px;left:8px;width:108px;height:108px}.segments button{font-size:11px;padding:7px 6px}}
+    .sweep-tick{position:absolute;z-index:2;pointer-events:none;background:rgba(235,239,244,.68);filter:drop-shadow(0 0 2px rgba(0,0,0,.75))}
+    .sweep-tick span{position:absolute;color:#f0f3f7;font-size:13px;font-weight:600;line-height:1;letter-spacing:.1px;white-space:nowrap;text-shadow:0 1px 3px #090b0e,0 0 4px #090b0e}
+    .sweep-tick.h{width:2px;height:14px}.sweep-tick.h span{left:50%;top:-20px;transform:translateX(-50%)}
+    .sweep-tick.v{width:14px;height:2px}.sweep-tick.v span{left:18px;top:50%;transform:translateY(-50%)}
+    .sweep-tick.minor{background:rgba(210,216,224,.48);filter:none}.sweep-tick.minor span{color:#b9c0c9;font-size:10px;font-weight:500;text-shadow:0 1px 3px #090b0e}.sweep-tick.h.minor{width:1px;height:8px}.sweep-tick.h.minor span{top:-14px}.sweep-tick.v.minor{width:8px;height:1px}.sweep-tick.v.minor span{left:12px}
+    @media(max-width:420px){.card{padding:12px}.angle-pad{height:292px}.fan-stage{max-width:240px}.aim-control{top:8px;left:8px;width:96px;height:96px}.segments button{font-size:11px;padding:7px 6px}}
     @media(prefers-reduced-motion:reduce){.on .grille{animation:none}}
   `; }
 }
