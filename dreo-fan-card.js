@@ -354,20 +354,45 @@ class DreoFanCard extends HTMLElement {
     return (i + n * (1 - 2 * i)) * 100;
   }
 
-  padX(h) { return this.padPos((h + 60) / 120); }
-  padY(v) { return this.padPos(1 - (v + 30) / 120); }
+  // A strip along the bottom of the pad is kept clear for the horizontal sweep
+  // bar, so the vertical mapping is squeezed into what is left. Constant rather
+  // than only when oscillating, otherwise the model would jump when the mode
+  // changes.
+  padReserve() { return Number(this.config.sweep_strip ?? 0.12); }
+  padPosY(n) { return this.padPos(n) * (1 - this.padReserve()); }
+  padNormY(t) { return this.padNorm(t / (1 - this.padReserve())); }
 
+  padX(h) { return this.padPos((h + 60) / 120); }
+  padY(v) { return this.padPosY(1 - (v + 30) / 120); }
+
+  // Sweep limits are drawn as dimension bars: a thin line with a T at each end.
+  // The horizontal one sits in the reserved strip below the fan rather than
+  // across it. The vertical one nests alongside, on whichever side the head is
+  // pointing, at a fixed offset that clears the model at any angle.
   sweepOverlay(direction) {
     if (direction === 'fixed') return '';
-    const l = this.sweepLeft();
-    const r = this.sweepRight();
-    const d = this.sweepDown();
-    const u = this.sweepUp();
-    const x1 = direction === 'vertical' ? this.padX(this.hAngle()) - 4 : this.padX(l);
-    const x2 = direction === 'vertical' ? this.padX(this.hAngle()) + 4 : this.padX(r);
-    const y1 = direction === 'horizontal' ? this.padY(this.vAngle()) - 4 : this.padY(u);
-    const y2 = direction === 'horizontal' ? this.padY(this.vAngle()) + 4 : this.padY(d);
-    return `<div class="sweep" style="left:${x1}%;width:${Math.max(0, x2 - x1)}%;top:${y1}%;height:${Math.max(0, y2 - y1)}%"></div>`;
+    let out = '';
+    if (direction !== 'vertical') {
+      // full mechanical range as the dim rail
+      const ra = this.padX(-60), rb = this.padX(60);
+      out += `<div class="sweep-h rail" style="left:${ra.toFixed(2)}%;width:${(rb-ra).toFixed(2)}%"></div>`;
+      // active sweep as the bright fill with T-caps
+      const a = this.padX(this.sweepLeft()), b = this.padX(this.sweepRight());
+      out += `<div class="sweep-h" style="left:${Math.min(a,b).toFixed(2)}%;`
+        + `width:${Math.abs(b-a).toFixed(2)}%"><i></i><i></i></div>`;
+    }
+    if (direction !== 'horizontal') {
+      const side = this.hAngle() < 0 ? 'left' : 'right';
+      // full mechanical range
+      const ra = this.padY(90), rb = this.padY(-30);
+      out += `<div class="sweep-v rail ${side}" style="top:${Math.min(ra,rb).toFixed(2)}%;`
+        + `height:${Math.abs(rb-ra).toFixed(2)}%"></div>`;
+      // active sweep
+      const a = this.padY(this.sweepUp()), b = this.padY(this.sweepDown());
+      out += `<div class="sweep-v ${side}" style="top:${Math.min(a,b).toFixed(2)}%;`
+        + `height:${Math.abs(b-a).toFixed(2)}%"><i></i><i></i></div>`;
+    }
+    return out;
   }
 
   // ---------------------------------------------------------------------
@@ -431,7 +456,7 @@ class DreoFanCard extends HTMLElement {
 
   fanSvgBody(h, v, spin = null) {
     const R = 43;    // drum radius at the grille
-    const RB = R * Number(this.config.rear_taper ?? 0.8);  // 1 = straight barrel
+    const RB = R * Number(this.config.rear_taper ?? 0.9);  // 1 = straight barrel
     const D = 38;    // drum depth
     const RY = 52;   // yoke radius
     const CX = 100, CY = 88;
@@ -652,7 +677,7 @@ class DreoFanCard extends HTMLElement {
     this._raf = null;
     if (!this.isOscillating()) return;
     if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
-    const period = Number(this.config.sweep_period_ms ?? 8000);
+    const period = Number(this.config.sweep_period_ms ?? 16000);
     const spinPeriod = 1100;
     let last = 0;
     const tick = now => {
@@ -820,7 +845,7 @@ class DreoFanCard extends HTMLElement {
     const point = e => {
       const r = pad.getBoundingClientRect();
       const x = this.padNorm((e.clientX-r.left)/r.width);
-      const y = this.padNorm((e.clientY-r.top)/r.height);
+      const y = this.padNormY((e.clientY-r.top)/r.height);
       return {
         x, y,
         h: Math.round((-60 + x*120)/5)*5,
@@ -831,7 +856,7 @@ class DreoFanCard extends HTMLElement {
       const p = point(e);
       this._pendingH = p.h;
       this._pendingV = p.v;
-      const t = $('.target'); t.style.left = `${this.padPos(p.x)}%`; t.style.top = `${this.padPos(p.y)}%`;
+      const t = $('.target'); t.style.left = `${this.padPos(p.x)}%`; t.style.top = `${this.padPosY(p.y)}%`;
       $('.angles').innerHTML = `<span>↔ ${this._pendingH}°</span><i></i><span>↕ ${this._pendingV}°</span>`;
       const svg = $('.fan-svg');
       if (svg) svg.innerHTML = this.fanSvgBody(this._pendingH, this._pendingV);
@@ -858,7 +883,7 @@ class DreoFanCard extends HTMLElement {
   }
 
   styles() { return `
-    :host{--blue:#2f79ff;display:block;font-family:var(--ha-card-header-font-family,system-ui)}
+    :host{--blue:#2f79ff;--sweep:#5aa9ff;--nest:97px;--range-width:60%;display:block;font-family:var(--ha-card-header-font-family,system-ui)}
     *{box-sizing:border-box} .card{padding:14px 16px 16px;color:var(--primary-text-color);background:linear-gradient(145deg,rgba(50,54,60,.98),rgba(25,27,30,.98));border-radius:22px;overflow:hidden}
     header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px} h2{margin:0 0 2px;font-size:19px;font-weight:600} p{margin:0;font-size:12px;color:var(--secondary-text-color)}
     button{font:inherit;color:inherit;border:0;cursor:pointer;-webkit-tap-highlight-color:transparent}.power{width:42px;height:42px;border-radius:50%;background:#45494f;display:grid;place-items:center}.on .power{background:var(--blue);color:white}.power ha-icon{--mdc-icon-size:22px}
@@ -867,10 +892,10 @@ class DreoFanCard extends HTMLElement {
     .speed-row{display:grid;grid-template-columns:auto auto 1fr;align-items:center;gap:10px}.speed-row .label{margin-bottom:0}.speed-row strong{font-size:17px;line-height:1;color:var(--blue)}.speed-row strong small{font-size:11px;color:#8a8f96}
     .slider-wrap{position:relative;padding-bottom:8px}input[type=range]{display:block;width:100%;margin:0;accent-color:var(--blue)}.ticks{position:absolute;left:8px;right:8px;bottom:0;height:6px}.ticks i{position:absolute;width:2px;height:6px;margin-left:-1px;border-radius:1px;background:#4a4f56}.ticks i.on{background:var(--blue)}
     .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}.section-head .label{margin-bottom:0}.angles{display:flex;align-items:center;gap:8px;color:var(--blue);font-size:13px}.angles i{height:14px;width:1px;background:#62666d}
-    .angle-pad{height:212px;position:relative;overflow:hidden;border-radius:16px;background:radial-gradient(ellipse at 50% 82%,#34404f 0,#24282e 30%,#17191d 72%);touch-action:none;border:1px solid #373b41}.grid-lines{position:absolute;inset:12px;background:linear-gradient(90deg,transparent 49.8%,#30343a 50%,transparent 50.2%),linear-gradient(0deg,transparent 49.8%,#30343a 50%,transparent 50.2%)}
+    .angle-pad{height:236px;position:relative;overflow:hidden;border-radius:16px;background:radial-gradient(ellipse at 50% 82%,#34404f 0,#24282e 30%,#17191d 72%);touch-action:none;border:1px solid #373b41}.grid-lines{position:absolute;inset:12px;background:linear-gradient(90deg,transparent 49.8%,#30343a 50%,transparent 50.2%),linear-gradient(0deg,transparent 49.8%,#30343a 50%,transparent 50.2%)}
 
     /* --- fan model: SVG cylinder, geometry computed in fanSvgBody --- */
-    .fan-stage{position:absolute;left:50%;top:50%;width:100%;height:100%;max-width:210px;transform:translate(-50%,-50%)}
+    .fan-stage{position:absolute;z-index:1;left:50%;top:44%;width:100%;height:88%;max-width:210px;transform:translate(-50%,-50%)}
     .fan-svg{width:100%;height:100%;display:block;overflow:visible}
     .fan-svg .ring{stroke:rgba(190,201,212,.4);stroke-width:.85}
     .fan-svg .rib{stroke:rgba(206,216,226,.5);stroke-width:2.2;stroke-linecap:round}
@@ -879,11 +904,20 @@ class DreoFanCard extends HTMLElement {
     @keyframes blade-motion{to{transform:rotate(360deg)}}
     .target{position:absolute;width:36px;height:36px;border-radius:50%;border:3px solid var(--blue);background:rgba(55,59,66,.75);transform:translate(-50%,-50%);display:grid;place-items:center;box-shadow:0 0 0 5px rgba(47,121,255,.1)}.target span{width:14px;height:14px;border-radius:50%;background:var(--blue)}.hint{text-align:center;margin-top:5px;color:#858a91;font-size:11px}
     .manual{display:grid;grid-template-columns:1fr auto;align-items:center;gap:10px}.manual>.label{margin-bottom:0}.dpad{width:112px;height:112px;border-radius:50%;background:#44484e;display:grid;grid-template:1fr 28px 1fr/1fr 28px 1fr;overflow:hidden}.dpad button{background:transparent;display:grid;place-items:center}.dpad button:active{background:#555b63}.dpad ha-icon{--mdc-icon-size:22px}.up{grid-area:1/2}.left{grid-area:2/1}.center{grid-area:2/2;border-radius:50%;background:#5c6169}.right{grid-area:2/3}.down{grid-area:3/2}
-    .ranges .range{margin-top:8px}.range-head{display:flex;justify-content:space-between;font-size:11px;color:#aeb1b5;margin-bottom:5px}.range-val{color:var(--blue)}
+    .ranges .range{width:var(--range-width);margin:8px auto 0}.range-head{display:flex;justify-content:space-between;font-size:11px;color:#aeb1b5;margin-bottom:5px}.range-val{color:var(--blue)}
     .range-track{position:relative;height:26px;touch-action:none;cursor:pointer}.range-track:before{content:'';position:absolute;left:0;right:0;top:11px;height:4px;border-radius:2px;background:#3a3e45}.range-fill{position:absolute;top:11px;height:4px;border-radius:2px;background:var(--blue)}.range-handle{position:absolute;top:4px;width:18px;height:18px;margin-left:-9px;border-radius:50%;background:#f5f5f6;box-shadow:0 1px 4px rgba(0,0,0,.5)}
-    .sweep{position:absolute;z-index:1;border:1px dashed rgba(47,121,255,.55);background:rgba(47,121,255,.09);border-radius:8px;pointer-events:none}
+    .sweep-h,.sweep-v{position:absolute;z-index:3;background:var(--sweep);border-radius:1px;pointer-events:none;filter:drop-shadow(0 0 5px rgba(90,169,255,.5))}
+    .sweep-h.rail,.sweep-v.rail{background:rgba(255,255,255,.14);filter:none;z-index:2}
+    .sweep-h i,.sweep-v i{position:absolute;background:var(--sweep);border-radius:1px}
+    .sweep-h{height:2px;bottom:5.5%}
+    .sweep-h i{top:-6px;width:2px;height:14px}
+    .sweep-h i:first-child{left:0}.sweep-h i:last-child{right:0}
+    .sweep-v{width:2px;left:min(calc(50% + var(--nest)),calc(100% - 14px))}
+    .sweep-v.left{left:max(calc(50% - var(--nest)),14px)}
+    .sweep-v i{left:-6px;width:14px;height:2px}
+    .sweep-v i:first-child{top:0}.sweep-v i:last-child{bottom:0}
     .modal-layer{position:fixed;z-index:9999;inset:0;display:none;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.62);backdrop-filter:blur(5px)}.modal-layer.show{display:flex}.dialog{width:min(360px,100%);padding:20px;border-radius:20px;background:#30343a;color:#f5f6f7;box-shadow:0 20px 55px rgba(0,0,0,.5)}.dialog h3{margin:0 0 8px;font-size:18px}.dialog p{margin:0;font-size:13px;color:#c4c7cc;line-height:1.45}.dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}.dialog-actions button{padding:9px 13px;border-radius:11px;background:#454a51;font-size:13px}.dialog-actions .accept{background:var(--blue);color:white;font-weight:600}
-    @media(max-width:420px){.card{padding:12px}.angle-pad{height:196px}.dpad{width:100px;height:100px;grid-template:1fr 26px 1fr/1fr 26px 1fr}.segments button{font-size:11px;padding:7px 6px}}
+    @media(max-width:420px){.card{padding:12px}.angle-pad{height:218px}:host{--nest:86px}.dpad{width:100px;height:100px;grid-template:1fr 26px 1fr/1fr 26px 1fr}.segments button{font-size:11px;padding:7px 6px}}
     @media(prefers-reduced-motion:reduce){.on .grille{animation:none}}
   `; }
 }
